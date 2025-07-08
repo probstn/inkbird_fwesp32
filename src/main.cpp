@@ -92,6 +92,7 @@
 #define RXBYTES 0x3B        // (0xFB) Overflow and number of bytes in the RX FIFO 94
 #define RCCTRL1_STATUS 0x3C // (0xFC) Last RC oscillator calibration result 94
 #define RCCTRL0_STATUS 0x3D // (0xFD) Last RC oscillator calibration result 95
+#define AGCCTRL2 0x1B
 
 /*
  * spi pins
@@ -176,32 +177,6 @@ byte getStatusByte()
     return status;
 }
 
-void writeConfig(uint8_t addr, uint8_t value)
-{
-    //
-    // Rf settings for CC1100
-    //
-    writeReg(IOCFG0, 0x06);   // GDO0 Output Pin Configuration
-    writeReg(PKTCTRL0, 0x05); // Packet Automation Control
-    writeReg(FSCTRL1, 0x06);  // Frequency Synthesizer Control
-    writeReg(FREQ2, 0x10);    // Frequency Control Word, High Byte
-    writeReg(FREQ1, 0xB0);    // Frequency Control Word, Middle Byte
-    writeReg(FREQ0, 0x71);    // Frequency Control Word, Low Byte
-    writeReg(MDMCFG4, 0xF5);  // Modem Configuration
-    writeReg(MDMCFG3, 0x83);  // Modem Configuration
-    writeReg(MDMCFG2, 0x03);  // Modem Configuration
-    writeReg(DEVIATN, 0x15);  // Modem Deviation Setting
-    writeReg(MCSM0, 0x18);    // Main Radio Control State Machine Configuration
-    writeReg(FOCCFG, 0x16);   // Frequency Offset Compensation Configuration
-    writeReg(FSCAL3, 0xE9);   // Frequency Synthesizer Calibration
-    writeReg(FSCAL2, 0x2A);   // Frequency Synthesizer Calibration
-    writeReg(FSCAL1, 0x00);   // Frequency Synthesizer Calibration
-    writeReg(FSCAL0, 0x1F);   // Frequency Synthesizer Calibration
-    writeReg(TEST2, 0x81);    // Various Test Settings
-    writeReg(TEST1, 0x35);    // Various Test Settings
-    writeReg(TEST0, 0x09);    // Various Test Settings
-}
-
 void printStatus(uint8_t status)
 {
     uint8_t ready = (status & 0b10000000) >> 7; // Check if the chip is ready
@@ -275,21 +250,21 @@ void setup()
     //
     // Rf settings for CC1100
     //
-    //
-    // Rf settings for CC1100
-    //
-    writeReg(IOCFG0, 0x06);   // GDO0 Output Pin Configuration
-    writeReg(PKTCTRL0, 0x05); // Packet Automation Control
+    writeReg(IOCFG2, 0x0D); // GDO2 Asynchronous Serial
+    writeReg(PKTLEN, 0x28);   // Packet Length
+    writeReg(PKTCTRL0, 0b00110010); // Async Serial, No CRC, Infinte Length
+    writeReg(PKTCTRL1, 0b00000000); // No address check, No CRC, No append status
     writeReg(FSCTRL1, 0x06);  // Frequency Synthesizer Control
     writeReg(FREQ2, 0x10);    // Frequency Control Word, High Byte
     writeReg(FREQ1, 0xB0);    // Frequency Control Word, Middle Byte
     writeReg(FREQ0, 0x71);    // Frequency Control Word, Low Byte
     writeReg(MDMCFG4, 0xC8);  // Modem Configuration
     writeReg(MDMCFG3, 0x93);  // Modem Configuration
-    writeReg(MDMCFG2, 0x03);  // Modem Configuration
+    writeReg(MDMCFG2, 0x00);  // Modem Configuration
     writeReg(DEVIATN, 0x34);  // Modem Deviation Setting
     writeReg(MCSM0, 0x18);    // Main Radio Control State Machine Configuration
     writeReg(FOCCFG, 0x16);   // Frequency Offset Compensation Configuration
+    writeReg(AGCCTRL2, 0x43); // AGC Control
     writeReg(FSCAL3, 0xE9);   // Frequency Synthesizer Calibration
     writeReg(FSCAL2, 0x2A);   // Frequency Synthesizer Calibration
     writeReg(FSCAL1, 0x00);   // Frequency Synthesizer Calibration
@@ -298,9 +273,9 @@ void setup()
     writeReg(TEST1, 0x35);    // Various Test Settings
     writeReg(TEST0, 0x09);    // Various Test Settings
 
-    writeReg(SYNC0, 0xAA);
-    writeReg(SYNC1, 0xAA);
-
+    // Sync Word
+    // writeReg(SYNC1, 0x2D); // Sync Word, High Byte
+    // writeReg(SYNC0, 0xD4); // Sync Word, Low Byte
 
     // flush rx fifo
     strobe(SFRX);
@@ -308,28 +283,38 @@ void setup()
     strobe(SRX);
 }
 
+#define MAX_MESSAGE_LENGTH 1024
+uint8_t ringBuffer[MAX_MESSAGE_LENGTH];
+uint16_t idx = 0;
+
 void loop()
 {
     uint8_t rxBytes = readStatus(RXBYTES) & 0x7F;
-    uint8_t numbytes = rxBytes & 0x7F;
-    uint8_t marcstate = readStatus(MARCSTATE) & 0x07; // Get the current state
+    uint8_t marcstate = readStatus(MARCSTATE);
 
-    if(numbytes) {
-        Serial.println("Received: ");
-        uint8_t buff[numbytes];
-        burstRead(RX_FIFO, buff, numbytes);
-        for(int i = 0; i < numbytes; i++) {
-            Serial.print(buff[i], HEX);
+    if (rxBytes > 0)
+    {
+        burstRead(RX_FIFO, ringBuffer + idx, rxBytes); // Read received bytes into the ring buffer
+        idx = (rxBytes + idx) % MAX_MESSAGE_LENGTH;
+        Serial.println(rxBytes);
+    }
+    if (marcstate == 0x01)
+    {
+        for (int i = 0; i < idx; i++)
+        {
+            Serial.print(ringBuffer[i], HEX); // Print received bytes
         }
         Serial.println();
-    }
-    if(marcstate != 0x0D) {
-        strobe(SFRX);
+        delay(1000);
         strobe(SRX);
+        idx = 0; // Reset index after processing
     }
+
+    /*
     Serial.print("Marcstate: ");
-    Serial.print(marcstate);
+    Serial.print(marcstate, HEX);
     Serial.print(" RxBytes: ");
     Serial.println(rxBytes);
-    delay(500);
+    */
+    delay(10);
 }
