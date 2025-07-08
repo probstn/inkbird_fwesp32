@@ -102,6 +102,10 @@
 #define CC1101_MISO 12
 #define CC1101_SCK 14
 
+#define MAX_MESSAGE_LENGTH 1024
+uint8_t ringBuffer[MAX_MESSAGE_LENGTH];
+uint16_t idx = 0;
+
 SPIClass hspi1(HSPI);
 
 void strobe(uint8_t cmd)
@@ -217,6 +221,81 @@ void printStatus(uint8_t status)
     Serial.println(fifo);
 }
 
+uint16_t crc16_ccitt(const uint8_t *data, uint8_t len)
+{
+    const uint16_t POLY = 0x8005;
+    uint16_t crc = 0x2F61;
+
+    for (uint8_t i = 0; i < len; i++)
+    {
+        crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++)
+        {
+            if (crc & 1)
+                crc = (crc >> 1) ^ POLY;
+            else
+                crc = crc >> 1;
+        }
+    }
+
+    return crc; // No final XOR
+}
+void decodePacket(const uint8_t *packet)
+{
+    if (packet[0] == 0xD3 && packet[1] == 0x91)
+    {
+
+        Serial.print("Device Type: ");
+        for (int i = 0; i < 3; i++)
+            Serial.printf("%02X ", packet[i]);
+        Serial.println();
+
+        Serial.print("Status: ");
+        switch (packet[3])
+        {
+        case 0x00:
+            Serial.println("Normal");
+            break;
+        case 0x40:
+            Serial.println("Unlink");
+            break;
+        case 0x80:
+            Serial.println("Battery Replaced");
+            break;
+        default:
+            Serial.printf("Unknown (%02X)\n", packet[3]);
+            break;
+        }
+
+        Serial.print("Sensor Mode: ");
+        Serial.println(packet[4] == 2 ? "External Present" : "Internal Only");
+
+        Serial.printf("FW/Unknown: %02X %02X\n", packet[5], packet[6]);
+        Serial.printf("Battery: %u%%\n", packet[7]);
+        Serial.printf("Device ID: %02X%02X\n", packet[8], packet[9]);
+
+        float temp = (packet[10] | (packet[11] << 8)) / 10.0;
+        Serial.printf("Internal Temp: %.1f°C\n", temp);
+
+        float ext_temp = (packet[12] | (packet[13] << 8)) / 10.0;
+        Serial.printf("External Temp: %.1f°C\n", ext_temp);
+
+        float humidity = (packet[14] | (packet[15] << 8)) / 10.0;
+        Serial.printf("Humidity: %.1f%%\n", humidity);
+
+        uint16_t crc_received = (packet[17] << 8) | packet[16];
+        uint16_t crc_calc = crc16_ccitt(packet, 16);
+
+        Serial.printf("CRC16: %04X (calculated), %04X (received) - %s\n",
+                      crc_calc, crc_received,
+                      crc_calc == crc_received ? "OK" : "BAD");
+
+        Serial.printf("Final byte (unknown 3 bits): %02X\n", packet[18]);
+    }
+    strobe(SFRX); // Flush RX FIFO after processing the packet
+    strobe(SRX); // Re-enter RX mode
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -250,17 +329,17 @@ void setup()
     //
     // Rf settings for CC1100
     //
-    writeReg(IOCFG2, 0x0D); // GDO2 Asynchronous Serial
-    writeReg(PKTLEN, 0x28);   // Packet Length
-    writeReg(PKTCTRL0, 0b00110010); // Async Serial, No CRC, Infinte Length
-    writeReg(PKTCTRL1, 0b00000000); // No address check, No CRC, No append status
+    writeReg(PKTLEN, 0x14);   // Packet Length
+    writeReg(PKTCTRL0, 0x00); // Async Serial, No CRC, Infinte Length
+    writeReg(PKTCTRL1, 0x01); // address check, No CRC, No append status
+    writeReg(ADDR, 0xD3);    // Device Address
     writeReg(FSCTRL1, 0x06);  // Frequency Synthesizer Control
     writeReg(FREQ2, 0x10);    // Frequency Control Word, High Byte
     writeReg(FREQ1, 0xB0);    // Frequency Control Word, Middle Byte
     writeReg(FREQ0, 0x71);    // Frequency Control Word, Low Byte
     writeReg(MDMCFG4, 0xC8);  // Modem Configuration
     writeReg(MDMCFG3, 0x93);  // Modem Configuration
-    writeReg(MDMCFG2, 0x00);  // Modem Configuration
+    // writeReg(MDMCFG2, 0x00);  // Modem Configuration
     writeReg(DEVIATN, 0x34);  // Modem Deviation Setting
     writeReg(MCSM0, 0x18);    // Main Radio Control State Machine Configuration
     writeReg(FOCCFG, 0x16);   // Frequency Offset Compensation Configuration
@@ -269,23 +348,16 @@ void setup()
     writeReg(FSCAL2, 0x2A);   // Frequency Synthesizer Calibration
     writeReg(FSCAL1, 0x00);   // Frequency Synthesizer Calibration
     writeReg(FSCAL0, 0x1F);   // Frequency Synthesizer Calibration
-    writeReg(TEST2, 0x81);    // Various Test Settings
-    writeReg(TEST1, 0x35);    // Various Test Settings
-    writeReg(TEST0, 0x09);    // Various Test Settings
 
     // Sync Word
-    // writeReg(SYNC1, 0x2D); // Sync Word, High Byte
-    // writeReg(SYNC0, 0xD4); // Sync Word, Low Byte
+    writeReg(SYNC1, 0x2D); // Sync Word, High Byte
+    writeReg(SYNC0, 0xD4); // Sync Word, Low Byte
 
     // flush rx fifo
     strobe(SFRX);
     // strobe rx
     strobe(SRX);
 }
-
-#define MAX_MESSAGE_LENGTH 1024
-uint8_t ringBuffer[MAX_MESSAGE_LENGTH];
-uint16_t idx = 0;
 
 void loop()
 {
@@ -300,15 +372,10 @@ void loop()
     }
     if (marcstate == 0x01)
     {
-        for (int i = 0; i < idx; i++)
-        {
-            Serial.print(ringBuffer[i], HEX); // Print received bytes
-        }
-        Serial.println();
-        delay(1000);
-        strobe(SRX);
+        decodePacket(ringBuffer); // Decode the packet if in RX state
         idx = 0; // Reset index after processing
     }
+    delay(100);
 
     /*
     Serial.print("Marcstate: ");
@@ -316,5 +383,4 @@ void loop()
     Serial.print(" RxBytes: ");
     Serial.println(rxBytes);
     */
-    delay(10);
 }
