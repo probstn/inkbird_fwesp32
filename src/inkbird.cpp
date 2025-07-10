@@ -1,5 +1,43 @@
 #include "inkbird.h"
 
+/**
+Decoder for Inkbird ITH-20R.
+
+https://www.ink-bird.com/products-data-logger-ith20r.html
+
+Also: Inkbird IBS-P01R Pool Thermometer.
+
+The compact 3-in-1 multifunction outdoor sensor transmits the data on 433.92 MHz.
+The device uses FSK-PCM encoding,
+The device sends a transmission every ~80 sec.
+
+Decoding borrowed from https://groups.google.com/forum/#!topic/rtl_433/oeExmwoBI0w
+
+- Total packet length 14563 bits:
+- Preamble: aa aa aa ... aa aa (14400 on-off sync bits)
+- Sync Word (16 bits): 2DD4
+- Data (147 bits):
+- Byte    Sample      Comment
+- 0-2     D3910F      Always the same across devices, a device type?
+- 3       00          00 - normal work , 40 - unlink sensor (button pressed 5s), 80 - battery replaced
+- 4       01          Changes from 1 to 2 if external sensor present
+- 5-6     0301        Unknown (also seen 0201), sw version? Seen 0x0001 on IBS-P01R.
+- 7       58          Battery % 0-100
+- 8-9     A221        Device id, always the same for a sensor but each sensor is different
+- 10-11   D600        Temperature in C * 10, little endian, so 0xD200 is 210, 21.0C or 69.8F
+- 12-13   F400        Temperature C * 10 for the external sensor,  0x1405 if not connected
+- 14-15   D301        Relative humidity %  * 10, little endian, so 0xC501 is 453 or 45.3%
+- 16-17   38FB        CRC16
+- 18      0           Unknown 3 bits (seen 0 and 2)
+
+CRC16 (bytes 0-15), without sync word):
+poly=0x8005  init=0x2f61  refin=true  refout=true  xorout=0x0000  check=0x3583  residue=0x0000
+
+To look at unknown data fields run with -vv key.
+
+Decoder written by Dmitriy Kozyrev, 2020
+*/
+
 uint16_t crc16lsb(const uint8_t message[], unsigned nBytes, uint16_t polynomial, uint16_t init)
 {
     uint16_t remainder = init;
